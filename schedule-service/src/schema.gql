@@ -1,0 +1,124 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+
+type AuditLogConnection {
+  items: [AuditLogModel!]!
+  skip: Int!
+  take: Int!
+  total: Int!
+}
+
+type AuditLogModel {
+  action: String!
+  createdAt: DateTime!
+  details: String
+  entity: String!
+  entityId: String!
+  id: ID!
+  userId: String!
+}
+
+input CreateCustomerInput {
+  email: String!
+  name: String!
+}
+
+input CreateDoctorInput {
+  name: String!
+}
+
+input CreateScheduleInput {
+  customerId: String!
+  doctorId: String!
+  objective: String!
+  scheduledAt: String!
+}
+
+type CustomerModel {
+  createdAt: DateTime!
+  email: String!
+  id: ID!
+  name: String!
+  updatedAt: DateTime!
+}
+
+"""
+A date-time string at UTC, such as 2019-12-03T09:54:33Z, compliant with the date-time format.
+"""
+scalar DateTime
+
+type DoctorModel {
+  createdAt: DateTime!
+  id: ID!
+  name: String!
+  updatedAt: DateTime!
+}
+
+type Mutation {
+  createCustomer(input: CreateCustomerInput!): CustomerModel!
+  createDoctor(input: CreateDoctorInput!): DoctorModel!
+  createSchedule(input: CreateScheduleInput!): ScheduleModel!
+  deleteCustomer(id: ID!): Boolean!
+  deleteDoctor(id: ID!): Boolean!
+  deleteSchedule(id: ID!): Boolean!
+  updateCustomer(id: ID!, input: UpdateCustomerInput!): CustomerModel!
+  updateDoctor(id: ID!, input: UpdateDoctorInput!): DoctorModel!
+  updateSchedule(id: ID!, input: UpdateScheduleInput!): ScheduleModel!
+}
+
+type Query {
+  auditLogs(skip: Int! = 0, take: Int! = 20): AuditLogConnection!
+  auditLogsByEntity(entity: String!, entityId: ID!, skip: Int! = 0, take: Int! = 20): AuditLogConnection!
+  customer(id: ID!): CustomerModel!
+  customers: [CustomerModel!]!
+  doctor(id: ID!): DoctorModel!
+  doctors: [DoctorModel!]!
+  health: String!
+  myAuditLogs(skip: Int! = 0, take: Int! = 20): AuditLogConnection!
+  protectedHealth: String!
+  schedule(id: ID!): ScheduleModel!
+  schedules(filters: ScheduleFilterInput, skip: Int = 0, take: Int = 20): ScheduleConnection!
+}
+
+type ScheduleConnection {
+  items: [ScheduleModel!]!
+  skip: Int!
+  take: Int!
+  total: Int!
+}
+
+input ScheduleFilterInput {
+  customerId: String
+  doctorId: String
+  from: String
+  to: String
+}
+
+type ScheduleModel {
+  createdAt: DateTime!
+  customer: CustomerModel!
+  customerId: String!
+  doctor: DoctorModel!
+  doctorId: String!
+  id: ID!
+  objective: String!
+  scheduledAt: DateTime!
+  updatedAt: DateTime!
+}
+
+input UpdateCustomerInput {
+  email: String
+  name: String
+}
+
+input UpdateDoctorInput {
+  name: String
+}
+
+input UpdateScheduleInput {
+  customerId: String
+  doctorId: String
+  objective: String
+  scheduledAt: String
+}

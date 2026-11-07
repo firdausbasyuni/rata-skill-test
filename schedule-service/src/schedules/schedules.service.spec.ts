@@ -1,0 +1,450 @@
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { Prisma } from '@prisma/client';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import { SchedulesService } from './schedules.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+
+describe('SchedulesService', () => {
+  let schedulesService: SchedulesService;
+
+  const mockPrisma = {
+    $transaction: vi.fn(),
+    customer: {
+      findFirst: vi.fn(),
+    },
+    doctor: {
+      findFirst: vi.fn(),
+    },
+    schedule: {
+      create: vi.fn(),
+      findMany: vi.fn(),
+      count: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    auditLog: {
+      create: vi.fn(),
+    },
+  };
+
+  const mockTransaction = {
+    customer: {
+      findFirst: vi.fn(),
+    },
+    doctor: {
+      findFirst: vi.fn(),
+    },
+    schedule: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    auditLog: {
+      create: vi.fn(),
+    },
+  };
+
+  const customerId = '75e712f0-8133-4d10-b5a3-e1c1f0c58d72';
+  const doctorId = '29cb5396-4170-4b9c-beeb-82a2154e851c';
+  const scheduleId = 'ad4b3ed6-fe37-42aa-bc29-dbf311a2a1fe';
+  const userId = '09b31c1f-7c49-436a-b83f-45dbb8faa311';
+
+  const scheduledAt = new Date('2026-11-10T09:00:00.000Z');
+
+  const mockCustomer = {
+    id: customerId,
+    name: 'Aldi',
+    email: 'aldi@example.com',
+    deletedAt: null,
+  };
+
+  const mockDoctor = {
+    id: doctorId,
+    name: 'Dr Jason Zhang',
+    deletedAt: null,
+  };
+
+  const mockSchedule = {
+    id: scheduleId,
+    objective: 'General Consultation',
+    customerId,
+    doctorId,
+    scheduledAt,
+    createdAt: new Date('2026-11-01T10:00:00.000Z'),
+    updatedAt: new Date('2026-11-01T10:00:00.000Z'),
+    deletedAt: null,
+    customer: mockCustomer,
+    doctor: mockDoctor,
+  };
+
+  const createInput = {
+    objective: 'General Consultation',
+    customerId,
+    doctorId,
+    scheduledAt: '2026-11-10T09:00:00.000Z',
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    schedulesService = new SchedulesService(
+      mockPrisma as unknown as PrismaService,
+    );
+
+    // Support both callback and array transactions.
+    mockPrisma.$transaction.mockImplementation(async (transaction: unknown) => {
+      if (typeof transaction === 'function') {
+        return transaction(mockTransaction);
+      }
+
+      return Promise.all(transaction as Promise<unknown>[]);
+    });
+  });
+
+  describe('create', () => {
+    it('should create a schedule and write an audit log', async () => {
+      mockTransaction.customer.findFirst.mockResolvedValue(mockCustomer);
+      mockTransaction.doctor.findFirst.mockResolvedValue(mockDoctor);
+      mockTransaction.schedule.create.mockResolvedValue(mockSchedule);
+      mockTransaction.auditLog.create.mockResolvedValue({});
+
+      const result = await schedulesService.create(createInput, userId);
+
+      expect(mockTransaction.customer.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: customerId,
+          deletedAt: null,
+        },
+      });
+
+      expect(mockTransaction.doctor.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: doctorId,
+          deletedAt: null,
+        },
+      });
+
+      expect(mockTransaction.schedule.create).toHaveBeenCalledWith({
+        data: {
+          objective: createInput.objective,
+          customerId,
+          doctorId,
+          scheduledAt,
+        },
+        include: {
+          customer: true,
+          doctor: true,
+        },
+      });
+
+      expect(mockTransaction.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId,
+            action: 'CREATE',
+            entity: 'SCHEDULE',
+            entityId: scheduleId,
+          }),
+        }),
+      );
+
+      expect(result).toEqual(mockSchedule);
+    });
+
+    it('should reject creation when the customer does not exist', async () => {
+      mockTransaction.customer.findFirst.mockResolvedValue(null);
+
+      await expect(
+        schedulesService.create(createInput, userId),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockTransaction.schedule.create).not.toHaveBeenCalled();
+      expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('should reject creation when the doctor does not exist', async () => {
+      mockTransaction.customer.findFirst.mockResolvedValue(mockCustomer);
+      mockTransaction.doctor.findFirst.mockResolvedValue(null);
+
+      await expect(
+        schedulesService.create(createInput, userId),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockTransaction.schedule.create).not.toHaveBeenCalled();
+      expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid scheduled date', async () => {
+      await expect(
+        schedulesService.create(
+          {
+            ...createInput,
+            scheduledAt: 'invalid-date',
+          },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject a duplicate doctor booking', async () => {
+      mockTransaction.customer.findFirst.mockResolvedValue(mockCustomer);
+      mockTransaction.doctor.findFirst.mockResolvedValue(mockDoctor);
+
+      mockTransaction.schedule.create.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+          code: 'P2002',
+          clientVersion: '6.19.3',
+        }),
+      );
+
+      await expect(
+        schedulesService.create(createInput, userId),
+      ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe('findAll', () => {
+    it('should return schedules with pagination metadata', async () => {
+      mockPrisma.schedule.findMany.mockResolvedValue([mockSchedule]);
+      mockPrisma.schedule.count.mockResolvedValue(1);
+
+      const result = await schedulesService.findAll(0, 20);
+
+      expect(mockPrisma.schedule.findMany).toHaveBeenCalledWith({
+        where: {
+          deletedAt: null,
+        },
+        skip: 0,
+        take: 20,
+        orderBy: {
+          scheduledAt: 'asc',
+        },
+        include: {
+          customer: true,
+          doctor: true,
+        },
+      });
+
+      expect(result).toEqual({
+        items: [mockSchedule],
+        total: 1,
+        skip: 0,
+        take: 20,
+      });
+    });
+
+    it('should apply customer, doctor, and date filters', async () => {
+      mockPrisma.schedule.findMany.mockResolvedValue([mockSchedule]);
+      mockPrisma.schedule.count.mockResolvedValue(1);
+
+      await schedulesService.findAll(0, 10, {
+        customerId,
+        doctorId,
+        from: '2026-11-10T00:00:00.000Z',
+        to: '2026-11-10T23:59:59.000Z',
+      });
+
+      expect(mockPrisma.schedule.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            deletedAt: null,
+            customerId,
+            doctorId,
+            scheduledAt: {
+              gte: new Date('2026-11-10T00:00:00.000Z'),
+              lte: new Date('2026-11-10T23:59:59.000Z'),
+            },
+          },
+        }),
+      );
+    });
+
+    it('should reject invalid pagination values', async () => {
+      await expect(schedulesService.findAll(-1, 20)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      await expect(schedulesService.findAll(0, 0)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      await expect(schedulesService.findAll(0, 101)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid date range', async () => {
+      await expect(
+        schedulesService.findAll(0, 20, {
+          from: '2026-11-11T00:00:00.000Z',
+          to: '2026-11-10T00:00:00.000Z',
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findOne', () => {
+    it('should return a schedule by ID', async () => {
+      mockPrisma.schedule.findFirst.mockResolvedValue(mockSchedule);
+
+      const result = await schedulesService.findOne(scheduleId);
+
+      expect(mockPrisma.schedule.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: scheduleId,
+          deletedAt: null,
+        },
+        include: {
+          customer: true,
+          doctor: true,
+        },
+      });
+
+      expect(result).toEqual(mockSchedule);
+    });
+
+    it('should throw when the schedule does not exist', async () => {
+      mockPrisma.schedule.findFirst.mockResolvedValue(null);
+
+      await expect(schedulesService.findOne(scheduleId)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe('update', () => {
+    it('should update a schedule and write an audit log', async () => {
+      const updateInput = {
+        objective: 'Annual Health Check-up',
+      };
+
+      const updatedSchedule = {
+        ...mockSchedule,
+        objective: 'Annual Health Check-up',
+      };
+
+      mockTransaction.schedule.findFirst.mockResolvedValue(mockSchedule);
+      mockTransaction.schedule.update.mockResolvedValue(updatedSchedule);
+      mockTransaction.auditLog.create.mockResolvedValue({});
+
+      const result = await schedulesService.update(
+        scheduleId,
+        updateInput,
+        userId,
+      );
+
+      expect(mockTransaction.schedule.update).toHaveBeenCalledWith({
+        where: { id: scheduleId },
+        data: {
+          objective: 'Annual Health Check-up',
+        },
+        include: {
+          customer: true,
+          doctor: true,
+        },
+      });
+
+      expect(mockTransaction.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId,
+            action: 'UPDATE',
+            entity: 'SCHEDULE',
+            entityId: scheduleId,
+            details: expect.objectContaining({
+              before: expect.any(Object),
+              after: expect.any(Object),
+            }),
+          }),
+        }),
+      );
+
+      expect(result).toEqual(updatedSchedule);
+    });
+
+    it('should reject updating a schedule that does not exist', async () => {
+      mockTransaction.schedule.findFirst.mockResolvedValue(null);
+
+      await expect(
+        schedulesService.update(
+          scheduleId,
+          { objective: 'Updated objective' },
+          userId,
+        ),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
+    });
+
+    it('should reject an update with an invalid date', async () => {
+      mockTransaction.schedule.findFirst.mockResolvedValue(mockSchedule);
+
+      await expect(
+        schedulesService.update(
+          scheduleId,
+          { scheduledAt: 'invalid-date' },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('remove', () => {
+    it('should soft-delete a schedule and write an audit log', async () => {
+      mockTransaction.schedule.findFirst.mockResolvedValue(mockSchedule);
+      mockTransaction.schedule.update.mockResolvedValue({
+        ...mockSchedule,
+        deletedAt: new Date(),
+        deletedBy: userId,
+      });
+      mockTransaction.auditLog.create.mockResolvedValue({});
+
+      const result = await schedulesService.remove(scheduleId, userId);
+
+      expect(mockTransaction.schedule.update).toHaveBeenCalledWith({
+        where: { id: scheduleId },
+        data: {
+          deletedAt: expect.any(Date),
+          deletedBy: userId,
+        },
+      });
+
+      expect(mockTransaction.auditLog.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId,
+            action: 'DELETE',
+            entity: 'SCHEDULE',
+            entityId: scheduleId,
+          }),
+        }),
+      );
+
+      expect(result).toBe(true);
+    });
+
+    it('should reject deletion when the schedule does not exist', async () => {
+      mockTransaction.schedule.findFirst.mockResolvedValue(null);
+
+      await expect(schedulesService.remove(scheduleId, userId)).rejects.toThrow(
+        NotFoundException,
+      );
+
+      expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
+      expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+    });
+  });
+});
