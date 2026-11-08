@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
+import { validate as isValidUUID } from 'uuid';
 
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateDoctorInput } from './dto/create-doctor.input.js';
@@ -8,7 +13,15 @@ import { UpdateDoctorInput } from './dto/update-doctor.input.js';
 export class DoctorsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private validateUUID(value: string, fieldName: string): void {
+    if (!isValidUUID(value)) {
+      throw new BadRequestException(`${fieldName} must be a valid UUID`);
+    }
+  }
+
   async create(input: CreateDoctorInput, userId: string) {
+    this.validateUUID(userId, 'userId');
+
     return this.prisma.$transaction(async (tx) => {
       const doctor = await tx.doctor.create({
         data: {
@@ -44,6 +57,8 @@ export class DoctorsService {
   }
 
   async findOne(id: string) {
+    this.validateUUID(id, 'id');
+
     const doctor = await this.prisma.doctor.findFirst({
       where: {
         id,
@@ -59,6 +74,9 @@ export class DoctorsService {
   }
 
   async update(id: string, input: UpdateDoctorInput, userId: string) {
+    this.validateUUID(id, 'id');
+    this.validateUUID(userId, 'userId');
+
     const existingDoctor = await this.findOne(id);
 
     return this.prisma.$transaction(async (tx) => {
@@ -93,6 +111,9 @@ export class DoctorsService {
   }
 
   async remove(id: string, userId: string) {
+    this.validateUUID(id, 'id');
+    this.validateUUID(userId, 'userId');
+
     const existingDoctor = await this.findOne(id);
 
     await this.prisma.$transaction(async (tx) => {

@@ -1,6 +1,6 @@
 # Healthcare Scheduling System
 
-A GraphQL-based healthcare scheduling system built with NestJS, PostgreSQL, Prisma ORM, and Docker. The application follows a microservices architecture with separate Authentication and Scheduling services.
+A GraphQL-based healthcare scheduling system built with NestJS, PostgreSQL, Prisma ORM, Redis, and Docker. The application follows a microservices architecture with separate Authentication, Scheduling, and Notification services.
 
 ## Features
 
@@ -24,10 +24,23 @@ A GraphQL-based healthcare scheduling system built with NestJS, PostgreSQL, Pris
 - Prevention of doctor double-booking.
 - Soft deletion for customers, doctors, and schedules.
 - Audit logging for create, update, and delete operations.
+- Redis caching for schedule queries.
+- Cache invalidation after schedule mutations.
+- Asynchronous email notification jobs through Bull.
+
+### Notification Service
+
+- Asynchronous email processing using Bull.
+- Redis-backed job queue.
+- SMTP email delivery using Nodemailer.
+- Configurable SMTP settings.
+- Automatic job retries.
+- Email notifications when appointments are created.
+- Mailpit integration for local email testing.
 
 ## Architecture
 
-The application consists of two independent NestJS services and one PostgreSQL instance.
+The application consists of three independent NestJS services, two PostgreSQL databases, and supporting Redis and SMTP infrastructure.
 
 ### Architecture Diagram
 
@@ -38,16 +51,26 @@ flowchart TB
     subgraph Docker["Docker Compose"]
         Auth["Auth Service<br/>NestJS · Port 3001"]
         Schedule["Schedule Service<br/>NestJS · Port 3002"]
-        DB[("PostgreSQL 16")]
+        Notification["Notification Service<br/>NestJS · Port 3003"]
 
+        DB[("PostgreSQL 16")]
         AuthDB[("auth_db")]
         ScheduleDB[("schedule_db")]
+
+        Redis[("Redis")]
+        Mailpit["Mailpit<br/>SMTP · Port 1025"]
 
         Auth --> AuthDB
         Schedule --> ScheduleDB
 
         AuthDB --- DB
         ScheduleDB --- DB
+
+        Schedule -->|"Enqueue email job"| Redis
+        Redis -->|"Process email job"| Notification
+        Notification -->|"SMTP"| Mailpit
+
+        Schedule -->|"Cache schedule queries"| Redis
     end
 
     Client -->|"Register / Login"| Auth
@@ -57,11 +80,15 @@ flowchart TB
 
 ### Service Responsibilities
 
-| Component        |        Port | Responsibility                            |
-| ---------------- | ----------: | ----------------------------------------- |
-| Auth Service     |        3001 | Registration, login, JWT validation       |
-| Schedule Service |        3002 | Customer, doctor, and schedule management |
-| PostgreSQL       | 5433 (host) | Persistent database storage               |
+| Component            |        Port | Responsibility                            |
+| -------------------- | ----------: | ----------------------------------------- |
+| Auth Service         |        3001 | Registration, login, JWT validation       |
+| Schedule Service     |        3002 | Customer, doctor, and schedule management |
+| Notification Service |        3003 | Asynchronous email processing             |
+| PostgreSQL           | 5433 (host) | Persistent database storage               |
+| Redis                | 6380 (host) | Queue storage and schedule caching        |
+| Mailpit SMTP         |        1025 | Local email delivery                      |
+| Mailpit UI           |        8025 | Email inspection and testing              |
 
 PostgreSQL contains two separate databases:
 
@@ -79,6 +106,30 @@ The Schedule Service validates incoming JWTs by communicating with the Auth Serv
 5. The Auth Service verifies the token and retrieves the associated user.
 6. If the token is valid, the request proceeds. Otherwise, the Schedule Service returns an authentication error.
 
+### Email Notification Flow
+
+1. A client creates a schedule through the Schedule Service.
+2. The Schedule Service saves the schedule and its audit record.
+3. The Schedule Service publishes an email notification job to the Bull queue.
+4. Redis stores the queued job.
+5. The Notification Service processes the job asynchronously.
+6. Nodemailer sends the email through the configured SMTP server.
+7. Mailpit receives the email in the local development environment.
+
+Email processing is asynchronous, so the Schedule Service does not need to wait for email delivery before responding to the client.
+
+### Redis Caching
+
+The Schedule Service uses Redis to cache schedule query results.
+
+- Schedule query results are cached for 30 seconds.
+- Cache keys include the query filters, pagination parameters, and a cache version.
+- Creating, updating, or deleting a schedule increments the cache version.
+- Version-based invalidation prevents subsequent queries from using outdated cache entries.
+- Cache failures are handled gracefully so that database operations can continue.
+
+Cache invalidation is best-effort. If Redis is unavailable during a mutation, existing cache entries may remain until their TTL expires.
+
 ## Technology Stack
 
 - **Backend:** NestJS, TypeScript
@@ -87,6 +138,10 @@ The Schedule Service validates incoming JWTs by communicating with the Auth Serv
 - **ORM:** Prisma 6
 - **Authentication:** JWT, bcrypt
 - **Validation:** class-validator
+- **Queue:** Bull
+- **Cache:** Redis, ioredis
+- **Email:** Nodemailer, SMTP
+- **Email Testing:** Mailpit
 - **Containerization:** Docker, Docker Compose
 - **Testing:** Vitest
 
@@ -100,10 +155,10 @@ healthcare-scheduling/
 │   │   └── schema.prisma
 │   ├── src/
 │   │   ├── auth/
-│   │   ├── prisma/
-│   │   └── ...
+│   │   └── prisma/
+│   ├── .env.example
 │   ├── Dockerfile
-│   └── .dockerignore
+│   └── package.json
 │
 ├── schedule-service/
 │   ├── prisma/
@@ -112,17 +167,27 @@ healthcare-scheduling/
 │   ├── src/
 │   │   ├── auth/
 │   │   ├── audit/
+│   │   ├── cache/
 │   │   ├── customers/
 │   │   ├── doctors/
 │   │   ├── schedules/
-│   │   ├── prisma/
-│   │   └── ...
+│   │   └── prisma/
+│   ├── .env.example
 │   ├── Dockerfile
-│   └── .dockerignore
+│   └── package.json
+│
+├── notification-service/
+│   ├── src/
+│   │   ├── notifications/
+│   │   └── app.controller.ts
+│   ├── .env.example
+│   ├── Dockerfile
+│   └── package.json
 │
 ├── docker/
 │   └── postgres/
 │       └── init/
+│           └── 01-create-databases.sql
 │
 ├── .env.example
 ├── .gitignore
@@ -143,6 +208,8 @@ For local development without Docker:
 - Node.js 24
 - npm
 - PostgreSQL 16
+- Redis 7
+- SMTP server or Mailpit
 
 ## Environment Configuration
 
@@ -179,10 +246,11 @@ The project uses separate environment files depending on the execution mode.
 - **Root `.env`** — Used by Docker Compose to configure PostgreSQL, JWT, and container settings.
 - **`auth-service/.env`** — Used when running the Auth Service locally outside Docker.
 - **`schedule-service/.env`** — Used when running the Schedule Service locally outside Docker.
+- **`notification-service/.env`** — Used when running the Notification Service locally outside Docker.
 
-For Docker deployment, only the root `.env` is required. Docker Compose provides the database connection strings and service URLs internally.
+For Docker deployment, only the root `.env` is required. Docker Compose provides the database connection strings, Redis host, SMTP host, and service URLs internally.
 
-For local development, configure the individual service environment files as shown below.
+For local development, configure the individual service environment files.
 
 Auth Service (`auth-service/.env`):
 
@@ -199,6 +267,21 @@ Schedule Service (`schedule-service/.env`):
 DATABASE_URL="postgresql://postgres:your_password@localhost:5433/schedule_db?schema=public"
 AUTH_SERVICE_URL="http://localhost:3001/graphql"
 PORT=3002
+REDIS_HOST=localhost
+REDIS_PORT=6380
+```
+
+Notification Service (`notification-service/.env`):
+
+```env
+PORT=3003
+REDIS_HOST=localhost
+REDIS_PORT=6380
+SMTP_HOST=localhost
+SMTP_PORT=1025
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM="Healthcare Scheduling <no-reply@healthcare.local>"
 ```
 
 Supported JWT expiration formats include:
@@ -230,10 +313,20 @@ View logs:
 docker compose logs -f
 ```
 
+View logs for a specific service:
+
+```bash
+docker compose logs -f auth-service
+docker compose logs -f schedule-service
+docker compose logs -f notification-service
+```
+
 The application endpoints are:
 
 - Auth Service: http://localhost:3001/graphql
 - Schedule Service: http://localhost:3002/graphql
+- Notification Service health check: http://localhost:3003/health
+- Mailpit UI: http://localhost:8025
 
 Stop the application:
 
@@ -241,13 +334,13 @@ Stop the application:
 docker compose down
 ```
 
-To remove the PostgreSQL data volume as well:
+To remove the PostgreSQL and Redis data volumes as well:
 
 ```bash
 docker compose down -v
 ```
 
-**Warning:** Removing the volume permanently deletes the databases and their data.
+**Warning:** Removing the volumes permanently deletes the databases, cached data, and queued jobs.
 
 ## Database Migrations
 
@@ -374,6 +467,8 @@ mutation {
   }
 }
 ```
+
+Creating a schedule also queues an asynchronous appointment confirmation email for the customer.
 
 ### List Schedules with Pagination and Filters
 
@@ -537,46 +632,54 @@ The GraphQL API exposes meaningful error codes, including:
 
 Run unit tests for each service.
 
-Auth Service:
+### Auth Service
 
 ```bash
 cd auth-service
 
-npm test
-npm run test:cov
+npm run test -- --coverage
+npm run build
 ```
 
-Schedule Service:
+### Schedule Service
 
 ```bash
 cd schedule-service
 
-npm test
-npm run test:cov
+npm run test -- --coverage
+npm run build
 ```
 
-Build both services:
+### Notification Service
 
 ```bash
-cd auth-service
-npm run build
+cd notification-service
 
-cd ../schedule-service
+npm run test -- --coverage
 npm run build
 ```
 
-The project includes unit tests for authentication, schedule management, validation, booking conflicts, soft deletion, and audit logging.
+The project includes unit tests for:
+
+- Authentication and token validation.
+- Customer, doctor, and schedule management.
+- Input validation and booking conflicts.
+- Soft deletion and audit logging.
+- Redis caching and cache invalidation.
+- Email job processing and SMTP configuration.
+- Notification Service health checks.
 
 ### Test Coverage
 
 The latest reported coverage results are:
 
-| Service          | Statements | Branches | Functions |  Lines |
-| ---------------- | ---------: | -------: | --------: | -----: |
-| Auth Service     |     92.45% |   85.00% |    83.33% | 92.45% |
-| Schedule Service |     88.88% |   83.82% |    86.66% | 88.88% |
+| Service              | Statements | Branches | Functions |  Lines |
+| -------------------- | ---------: | -------: | --------: | -----: |
+| Auth Service         |     92.45% |   85.00% |    83.33% | 92.45% |
+| Schedule Service     |     94.54% |   86.01% |    95.55% | 94.54% |
+| Notification Service |       100% |   83.33% |      100% |   100% |
 
-Both services exceed the assignment's minimum 50% unit test coverage requirement.
+All three services exceed the assignment's minimum 50% unit test coverage requirement.
 
 ## License
 

@@ -5,9 +5,11 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Queue } from 'bull';
 
 import { SchedulesService } from './schedules.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { CacheService } from '../cache/cache.service.js';
 
 describe('SchedulesService', () => {
   let schedulesService: SchedulesService;
@@ -32,6 +34,17 @@ describe('SchedulesService', () => {
     },
   };
 
+  const mockEmailQueue = {
+    add: vi.fn().mockResolvedValue({ id: 'test-job-1' }),
+  };
+
+  const mockCacheService = {
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue(undefined),
+    getScheduleCacheVersion: vi.fn().mockResolvedValue('0'),
+    invalidateSchedules: vi.fn().mockResolvedValue(undefined),
+  };
+
   const mockTransaction = {
     customer: {
       findFirst: vi.fn(),
@@ -53,6 +66,8 @@ describe('SchedulesService', () => {
   const doctorId = '29cb5396-4170-4b9c-beeb-82a2154e851c';
   const scheduleId = 'ad4b3ed6-fe37-42aa-bc29-dbf311a2a1fe';
   const userId = '09b31c1f-7c49-436a-b83f-45dbb8faa311';
+
+  const invalidUUID = 'Y123456';
 
   const scheduledAt = new Date('2026-11-10T09:00:00.000Z');
 
@@ -92,8 +107,17 @@ describe('SchedulesService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    mockEmailQueue.add.mockResolvedValue({ id: 'test-job-1' });
+
+    mockCacheService.get.mockResolvedValue(null);
+    mockCacheService.set.mockResolvedValue(undefined);
+    mockCacheService.getScheduleCacheVersion.mockResolvedValue('0');
+    mockCacheService.invalidateSchedules.mockResolvedValue(undefined);
+
     schedulesService = new SchedulesService(
       mockPrisma as unknown as PrismaService,
+      mockEmailQueue as unknown as Queue,
+      mockCacheService as unknown as CacheService,
     );
 
     // Support both callback and array transactions.
@@ -153,7 +177,46 @@ describe('SchedulesService', () => {
         }),
       );
 
+      expect(mockEmailQueue.add).toHaveBeenCalledWith(
+        'send',
+        expect.objectContaining({
+          to: mockCustomer.email,
+          subject: 'Your appointment has been scheduled',
+        }),
+      );
+
+      expect(mockCacheService.invalidateSchedules).toHaveBeenCalledTimes(1);
       expect(result).toEqual(mockSchedule);
+    });
+
+    it('should reject an invalid customer UUID', async () => {
+      await expect(
+        schedulesService.create(
+          { ...createInput, customerId: invalidUUID },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid doctor UUID', async () => {
+      await expect(
+        schedulesService.create(
+          { ...createInput, doctorId: invalidUUID },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid user UUID', async () => {
+      await expect(
+        schedulesService.create(createInput, invalidUUID),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('should reject creation when the customer does not exist', async () => {
@@ -165,6 +228,8 @@ describe('SchedulesService', () => {
 
       expect(mockTransaction.schedule.create).not.toHaveBeenCalled();
       expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+      expect(mockEmailQueue.add).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
     });
 
     it('should reject creation when the doctor does not exist', async () => {
@@ -177,6 +242,8 @@ describe('SchedulesService', () => {
 
       expect(mockTransaction.schedule.create).not.toHaveBeenCalled();
       expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+      expect(mockEmailQueue.add).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
     });
 
     it('should reject an invalid scheduled date', async () => {
@@ -207,6 +274,25 @@ describe('SchedulesService', () => {
       await expect(
         schedulesService.create(createInput, userId),
       ).rejects.toThrow(ConflictException);
+
+      expect(mockEmailQueue.add).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
+    });
+
+    it('should not fail schedule creation when email enqueueing fails', async () => {
+      mockTransaction.customer.findFirst.mockResolvedValue(mockCustomer);
+      mockTransaction.doctor.findFirst.mockResolvedValue(mockDoctor);
+      mockTransaction.schedule.create.mockResolvedValue(mockSchedule);
+      mockTransaction.auditLog.create.mockResolvedValue({});
+
+      mockEmailQueue.add.mockRejectedValue(
+        new Error('Redis queue unavailable'),
+      );
+
+      const result = await schedulesService.create(createInput, userId);
+
+      expect(result).toEqual(mockSchedule);
+      expect(mockCacheService.invalidateSchedules).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -216,6 +302,9 @@ describe('SchedulesService', () => {
       mockPrisma.schedule.count.mockResolvedValue(1);
 
       const result = await schedulesService.findAll(0, 20);
+
+      expect(mockCacheService.getScheduleCacheVersion).toHaveBeenCalled();
+      expect(mockCacheService.get).toHaveBeenCalled();
 
       expect(mockPrisma.schedule.findMany).toHaveBeenCalledWith({
         where: {
@@ -232,12 +321,41 @@ describe('SchedulesService', () => {
         },
       });
 
+      expect(mockCacheService.set).toHaveBeenCalledWith(
+        expect.stringContaining('schedules:v0:'),
+        {
+          items: [mockSchedule],
+          total: 1,
+          skip: 0,
+          take: 20,
+        },
+        30,
+      );
+
       expect(result).toEqual({
         items: [mockSchedule],
         total: 1,
         skip: 0,
         take: 20,
       });
+    });
+
+    it('should return cached schedules without querying the database', async () => {
+      const cachedResult = {
+        items: [mockSchedule],
+        total: 1,
+        skip: 0,
+        take: 20,
+      };
+
+      mockCacheService.get.mockResolvedValue(cachedResult);
+
+      const result = await schedulesService.findAll(0, 20);
+
+      expect(result).toEqual(cachedResult);
+      expect(mockPrisma.schedule.findMany).not.toHaveBeenCalled();
+      expect(mockPrisma.schedule.count).not.toHaveBeenCalled();
+      expect(mockCacheService.set).not.toHaveBeenCalled();
     });
 
     it('should apply customer, doctor, and date filters', async () => {
@@ -266,6 +384,28 @@ describe('SchedulesService', () => {
       );
     });
 
+    it('should reject an invalid customer UUID filter', async () => {
+      await expect(
+        schedulesService.findAll(0, 20, {
+          customerId: invalidUUID,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockCacheService.getScheduleCacheVersion).not.toHaveBeenCalled();
+      expect(mockPrisma.schedule.findMany).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid doctor UUID filter', async () => {
+      await expect(
+        schedulesService.findAll(0, 20, {
+          doctorId: invalidUUID,
+        }),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockCacheService.getScheduleCacheVersion).not.toHaveBeenCalled();
+      expect(mockPrisma.schedule.findMany).not.toHaveBeenCalled();
+    });
+
     it('should reject invalid pagination values', async () => {
       await expect(schedulesService.findAll(-1, 20)).rejects.toThrow(
         BadRequestException,
@@ -279,7 +419,12 @@ describe('SchedulesService', () => {
         BadRequestException,
       );
 
-      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      await expect(schedulesService.findAll(0.5, 20)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      expect(mockCacheService.get).not.toHaveBeenCalled();
+      expect(mockPrisma.schedule.findMany).not.toHaveBeenCalled();
     });
 
     it('should reject an invalid date range', async () => {
@@ -290,7 +435,8 @@ describe('SchedulesService', () => {
         }),
       ).rejects.toThrow(BadRequestException);
 
-      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+      expect(mockCacheService.get).not.toHaveBeenCalled();
+      expect(mockPrisma.schedule.findMany).not.toHaveBeenCalled();
     });
   });
 
@@ -312,6 +458,14 @@ describe('SchedulesService', () => {
       });
 
       expect(result).toEqual(mockSchedule);
+    });
+
+    it('should reject an invalid schedule UUID', async () => {
+      await expect(schedulesService.findOne(invalidUUID)).rejects.toThrow(
+        BadRequestException,
+      );
+
+      expect(mockPrisma.schedule.findFirst).not.toHaveBeenCalled();
     });
 
     it('should throw when the schedule does not exist', async () => {
@@ -370,7 +524,52 @@ describe('SchedulesService', () => {
         }),
       );
 
+      expect(mockCacheService.invalidateSchedules).toHaveBeenCalledTimes(1);
       expect(result).toEqual(updatedSchedule);
+    });
+
+    it('should reject an invalid schedule UUID', async () => {
+      await expect(
+        schedulesService.update(
+          invalidUUID,
+          { objective: 'Updated objective' },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid user UUID', async () => {
+      await expect(
+        schedulesService.update(
+          scheduleId,
+          { objective: 'Updated objective' },
+          invalidUUID,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid customer UUID', async () => {
+      await expect(
+        schedulesService.update(
+          scheduleId,
+          { customerId: invalidUUID },
+          userId,
+        ),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid doctor UUID', async () => {
+      await expect(
+        schedulesService.update(scheduleId, { doctorId: invalidUUID }, userId),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('should reject updating a schedule that does not exist', async () => {
@@ -385,6 +584,7 @@ describe('SchedulesService', () => {
       ).rejects.toThrow(NotFoundException);
 
       expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
     });
 
     it('should reject an update with an invalid date', async () => {
@@ -399,6 +599,7 @@ describe('SchedulesService', () => {
       ).rejects.toThrow(BadRequestException);
 
       expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
     });
   });
 
@@ -433,7 +634,24 @@ describe('SchedulesService', () => {
         }),
       );
 
+      expect(mockCacheService.invalidateSchedules).toHaveBeenCalledTimes(1);
       expect(result).toBe(true);
+    });
+
+    it('should reject an invalid schedule UUID', async () => {
+      await expect(
+        schedulesService.remove(invalidUUID, userId),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('should reject an invalid user UUID', async () => {
+      await expect(
+        schedulesService.remove(scheduleId, invalidUUID),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     });
 
     it('should reject deletion when the schedule does not exist', async () => {
@@ -445,6 +663,7 @@ describe('SchedulesService', () => {
 
       expect(mockTransaction.schedule.update).not.toHaveBeenCalled();
       expect(mockTransaction.auditLog.create).not.toHaveBeenCalled();
+      expect(mockCacheService.invalidateSchedules).not.toHaveBeenCalled();
     });
   });
 });
