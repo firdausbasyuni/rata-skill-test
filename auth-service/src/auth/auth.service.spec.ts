@@ -56,7 +56,9 @@ describe('AuthService', () => {
 
   describe('register', () => {
     it('should register a new user successfully', async () => {
-      vi.mocked(bcrypt.hash).mockResolvedValue('hashed-password');
+      vi.mocked(bcrypt.hash).mockReturnValue(
+        Promise.resolve('hashed-password') as never,
+      );
 
       mockPrisma.user.findUnique.mockResolvedValue(null);
       mockPrisma.user.create.mockResolvedValue({
@@ -98,7 +100,9 @@ describe('AuthService', () => {
     });
 
     it('should normalize the email before registration', async () => {
-      vi.mocked(bcrypt.hash).mockResolvedValue('hashed-password');
+      vi.mocked(bcrypt.hash).mockReturnValue(
+        Promise.resolve('hashed-password') as never,
+      );
 
       mockPrisma.user.findUnique.mockResolvedValue(null);
       mockPrisma.user.create.mockResolvedValue(mockUser);
@@ -135,7 +139,9 @@ describe('AuthService', () => {
     });
 
     it('should handle concurrent duplicate registration attempts', async () => {
-      vi.mocked(bcrypt.hash).mockResolvedValue('hashed-password');
+      vi.mocked(bcrypt.hash).mockReturnValue(
+        Promise.resolve('hashed-password') as never,
+      );
 
       mockPrisma.user.findUnique.mockResolvedValue(null);
       mockPrisma.user.create.mockRejectedValue({
@@ -153,7 +159,7 @@ describe('AuthService', () => {
 
   describe('login', () => {
     it('should log in successfully with valid credentials', async () => {
-      vi.mocked(bcrypt.compare).mockResolvedValue(true);
+      vi.mocked(bcrypt.compare).mockReturnValue(Promise.resolve(true) as never);
 
       mockPrisma.user.findUnique.mockResolvedValue(mockUser);
 
@@ -191,7 +197,9 @@ describe('AuthService', () => {
     });
 
     it('should reject login with an incorrect password', async () => {
-      vi.mocked(bcrypt.compare).mockResolvedValue(false);
+      vi.mocked(bcrypt.compare).mockReturnValue(
+        Promise.resolve(false) as never,
+      );
 
       mockPrisma.user.findUnique.mockResolvedValue(mockUser);
 
@@ -204,7 +212,7 @@ describe('AuthService', () => {
     });
 
     it('should normalize the email before login', async () => {
-      vi.mocked(bcrypt.compare).mockResolvedValue(true);
+      vi.mocked(bcrypt.compare).mockReturnValue(Promise.resolve(true) as never);
 
       mockPrisma.user.findUnique.mockResolvedValue(mockUser);
 

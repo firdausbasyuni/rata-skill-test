@@ -2,7 +2,9 @@ import {
   Injectable,
   ConflictException,
   NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
+import { validate as isValidUUID } from 'uuid';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateCustomerInput } from './dto/create-customer.input.js';
 import { UpdateCustomerInput } from './dto/update-customer.input.js';
@@ -11,7 +13,15 @@ import { UpdateCustomerInput } from './dto/update-customer.input.js';
 export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private validateUUID(value: string, fieldName: string): void {
+    if (!isValidUUID(value)) {
+      throw new BadRequestException(`${fieldName} must be a valid UUID`);
+    }
+  }
+
   async create(input: CreateCustomerInput, userId: string) {
+    this.validateUUID(userId, 'userId');
+
     try {
       return await this.prisma.$transaction(async (tx) => {
         const customer = await tx.customer.create({
@@ -53,6 +63,8 @@ export class CustomersService {
   }
 
   async findOne(id: string) {
+    this.validateUUID(id, 'id');
+
     const customer = await this.prisma.customer.findFirst({
       where: {
         id,
@@ -68,6 +80,9 @@ export class CustomersService {
   }
 
   async update(id: string, input: UpdateCustomerInput, userId: string) {
+    this.validateUUID(id, 'id');
+    this.validateUUID(userId, 'userId');
+
     const existingCustomer = await this.findOne(id);
 
     try {
@@ -113,6 +128,9 @@ export class CustomersService {
   }
 
   async remove(id: string, userId: string) {
+    this.validateUUID(id, 'id');
+    this.validateUUID(userId, 'userId');
+
     const existingCustomer = await this.findOne(id);
 
     await this.prisma.$transaction(async (tx) => {
